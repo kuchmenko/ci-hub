@@ -47,12 +47,25 @@ On the Proxmox VM (Debian 12, root shell):
 # Install the age private key (restored from password-manager backup)
 install -m 0400 -o root -g root /path/to/age-key.txt /root/.age/key.txt
 
-# Clone the repo (secrets must already be encrypted to the matching pubkey)
+# One-liner: clone repo + install Docker + decrypt secrets + up hub
+curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh | sudo bash
+```
+
+Or, equivalently, step by step:
+
+```bash
 git clone git@github.com:kuchmenko/ci-hub.git /opt/ci-hub
 cd /opt/ci-hub
-
-# Install Docker CE, decrypt secrets, bring up the analysis hub.
 sudo ./scripts/bootstrap-vm.sh
+```
+
+If you don't trust piping a script to `sudo bash`, download it first and read
+it before running:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh -o install.sh
+less install.sh
+sudo bash install.sh
 ```
 
 After SonarQube reports healthy, open `http://<VM_IP>:9000` from your LAN:
@@ -104,6 +117,7 @@ printf 'value' | sops --encrypt --input-type binary --output-type binary \
 
 | Path | Purpose |
 |---|---|
+| `install.sh` | Curl-installable entry point: clones repo, runs bootstrap-vm.sh |
 | `compose.minimal.yml` | Hub only: postgres + sonarqube. Phase 3 bootstrap target. |
 | `compose.yml` | `include:`s minimal, adds trivy + 2× runner/dind. Phase 4+. |
 | `.sops.yaml` | SOPS/age config. Placeholder recipient until `age-keygen` is run. |
