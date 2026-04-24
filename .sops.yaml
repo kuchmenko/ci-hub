@@ -1,0 +1,17 @@
+# SOPS configuration. Every file matching secrets/.*\.age is encrypted with
+# the age recipient below.
+#
+# TODO: the recipient is a placeholder. Before encrypting any real secret:
+#   1. On the Proxmox VM, as root:
+#        mkdir -p /root/.age && chmod 0700 /root/.age
+#        age-keygen -o /root/.age/key.txt
+#        chmod 0400 /root/.age/key.txt
+#      `age-keygen` prints the public key; copy it.
+#   2. Back up /root/.age/key.txt to a password manager. Losing it means
+#      every secret must be re-provisioned from scratch.
+#   3. Replace the placeholder below with the real public key and commit.
+#   4. Any collaborator who needs to encrypt new secrets uses the public key;
+#      decryption still requires the private key on the VM.
+creation_rules:
+  - path_regex: secrets/.*\.age$
+    age: age1TODO_REPLACE_WITH_PUBKEY_FROM_AGE_KEYGEN_ON_PROXMOX_HOST

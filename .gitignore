@@ -1,0 +1,17 @@
+# Decrypted secrets. Only the .age encrypted versions are committed.
+secrets/*
+!secrets/*.age
+!secrets/.gitkeep
+
+# Local compose overrides and env files
+.env
+.env.local
+compose.override.yml
+docker-compose.override.yml
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

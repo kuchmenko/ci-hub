@@ -1,0 +1,100 @@
+# Full stack: minimal hub (included) + trivy server + 2× runner/dind pairs.
+# All services share the default project network — runners reach
+# sonarqube and trivy via Docker DNS.
+#
+# Start: docker compose up -d
+# Requires: gh_runner_pat secret decrypted and runner image available.
+
+name: ci-hub
+
+include:
+  - compose.minimal.yml
+
+services:
+  trivy:
+    image: aquasec/trivy:latest
+    command: server --listen 0.0.0.0:4954
+    volumes:
+      - trivy-db:/root/.cache/trivy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    restart: unless-stopped
+
+  dind-01:
+    image: docker:24-dind
+    # privileged inside the VM = root in the guest kernel, not on Proxmox.
+    # Combined with the VM hypervisor boundary, acceptable per issue #1.
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - dind-01-data:/var/lib/docker
+    deploy:
+      resources:
+        limits:
+          cpus: "3.0"
+          memory: 4G
+    restart: unless-stopped
+
+  runner-01:
+    # TODO Phase 6: replace with ghcr.io/kuchmenko/gh-runner:latest once the
+    # prebuilt image exists. For Phase 4 bring-up, either build locally from
+    # runner/Dockerfile or substitute myoung34/docker-github-actions-runner:latest.
+    image: ghcr.io/kuchmenko/gh-runner:latest
+    depends_on:
+      dind-01:
+        condition: service_started
+    environment:
+      DOCKER_HOST: tcp://dind-01:2375
+      RUNNER_NAME: homelab-runner-01
+      RUNNER_LABELS: self-hosted,linux,x64
+      RUNNER_EPHEMERAL: "true"
+      GITHUB_OWNER: kuchmenko
+      GITHUB_PAT_FILE: /run/secrets/gh_runner_pat
+    secrets:
+      - gh_runner_pat
+    # Ephemeral runner exits after each job; `restart: always` spawns a fresh
+    # container which re-registers with GitHub on boot.
+    restart: always
+
+  dind-02:
+    image: docker:24-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - dind-02-data:/var/lib/docker
+    deploy:
+      resources:
+        limits:
+          cpus: "3.0"
+          memory: 4G
+    restart: unless-stopped
+
+  runner-02:
+    image: ghcr.io/kuchmenko/gh-runner:latest
+    depends_on:
+      dind-02:
+        condition: service_started
+    environment:
+      DOCKER_HOST: tcp://dind-02:2375
+      RUNNER_NAME: homelab-runner-02
+      RUNNER_LABELS: self-hosted,linux,x64
+      RUNNER_EPHEMERAL: "true"
+      GITHUB_OWNER: kuchmenko
+      GITHUB_PAT_FILE: /run/secrets/gh_runner_pat
+    secrets:
+      - gh_runner_pat
+    restart: always
+
+volumes:
+  trivy-db:
+  dind-01-data:
+  dind-02-data:
+
+secrets:
+  gh_runner_pat:
+    file: ./secrets/gh_runner_pat

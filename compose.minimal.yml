@@ -1,0 +1,75 @@
+# Minimal analysis hub: postgres + sonarqube.
+# Access from the LAN: http://<VM_IP>:9000
+# Runners reach SQ internally via Docker DNS: http://sonarqube:9000
+#
+# Start: docker compose -f compose.minimal.yml up -d
+
+name: ci-hub
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: sonarqube
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_DB: sonarqube
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonarqube"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    restart: unless-stopped
+
+  sonarqube:
+    image: sonarqube:lts-community
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonarqube
+      SONAR_JDBC_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonarqube-data:/opt/sonarqube/data
+      - sonarqube-logs:/opt/sonarqube/logs
+      - sonarqube-extensions:/opt/sonarqube/extensions
+    # SonarQube's embedded Elasticsearch needs a high file-descriptor ceiling.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsSL http://localhost:9000/api/system/status | grep -q UP"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  sonarqube-data:
+  sonarqube-logs:
+  sonarqube-extensions:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
