@@ -1,130 +1,76 @@
 # ci-hub
 
-Self-hosted CI + static analysis pipeline for the homelab. Two ephemeral
-GitHub Actions runners (DinD-isolated) plus SonarQube Community Build with
-unified SARIF output across TypeScript, Python, Go, and Rust.
+Self-hosted CI + static analysis pipeline for the homelab. SonarQube
+Community Build with unified SARIF output across TypeScript, Python, Go,
+and Rust, plus two ephemeral GitHub Actions runners (DinD-isolated).
 
 Full design and rationale: [kuchmenko/ci-hub#1](https://github.com/kuchmenko/ci-hub/issues/1).
 
-## Architecture (short form)
+## Install
 
-Single Debian 12 VM on Proxmox. **VM over LXC by choice** — supply-chain
-threat model (malicious `build.rs`, `postinstall`, `setup.py`) wants a
-hypervisor boundary, not a shared kernel. See issue #1 Subsystem 1 for the
-attack-surface reasoning.
+On a fresh Debian 12 VM:
 
-Everything runs on the default Docker bridge inside the VM. SonarQube
-publishes `:9000` on the VM IP — access from the LAN via
-`http://<VM_IP>:9000`. Runners reach SQ internally over Docker DNS
-(`http://sonarqube:9000`).
-
-**No TLS in the MVP.** Access is LAN-only to a machine you control.
-HTTPS/remote access is additive: drop in a Tailscale daemon or a Cloudflare
-Tunnel later without touching the hub topology.
-
-Runners use a DinD sidecar per runner, not a host-socket bind. A compromised
-job can harm the sidecar namespace only; the sibling hub is unreachable from
-the job's kernel perspective, though they share the Docker bridge at the
-network layer.
-
-## Status
-
-Phase 2 (compose scaffold) in progress. Later phases track issue #1 checklist.
-
-| Phase | State |
-|---|---|
-| 0 Defaults sign-off | pending |
-| 1 VM bootstrap | VM created, Docker not yet installed |
-| 2 Compose scaffold | **in progress** |
-| 3 Analysis hub online | blocked on Phase 2 |
-| 4–9 | blocked |
-
-## Quickstart
-
-On the Proxmox VM (Debian 12, root shell):
-
-```bash
-# Install the age private key (restored from password-manager backup)
-install -m 0400 -o root -g root /path/to/age-key.txt /root/.age/key.txt
-
-# One-liner: clone repo + install Docker + decrypt secrets + up hub
-curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh | sudo bash
+```
+curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh | sudo sh
 ```
 
-Or, equivalently, step by step:
+Takes ~3 minutes. SonarQube comes up on `http://<VM_IP>:9000`. First login
+is `admin` / `admin` — rotate the password immediately.
 
-```bash
-git clone git@github.com:kuchmenko/ci-hub.git /opt/ci-hub
-cd /opt/ci-hub
-sudo ./scripts/bootstrap-vm.sh
+Want to inspect before running:
+
 ```
-
-If you don't trust piping a script to `sudo bash`, download it first and read
-it before running:
-
-```bash
 curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh -o install.sh
 less install.sh
-sudo bash install.sh
+sudo sh install.sh
 ```
 
-After SonarQube reports healthy, open `http://<VM_IP>:9000` from your LAN:
+## What install.sh does
 
-1. Log in as `admin` / `admin`, rotate the password. Encrypt the new one
-   into `secrets/sq_admin_password.age` and commit.
-2. Generate a scoped analysis token in the SQ UI; encrypt into
-   `secrets/sq_analysis_token.age`.
-3. Define the `homelab-default` quality gate (issue #1 Phase 3) and mark it
-   as the instance default.
+1. Installs Docker CE and git (idempotent).
+2. Sets `vm.max_map_count=262144` for SonarQube's embedded Elasticsearch.
+3. Clones this repo to `/opt/ci-hub`.
+4. Generates a random Postgres password into `/opt/ci-hub/.env`.
+5. `docker compose -f compose.minimal.yml up -d` — postgres + sonarqube.
 
-Runners, Trivy server, and the full stack are Phase 4+
-(`docker compose up -d` on `compose.yml` once `gh_runner_pat` is provisioned).
+## Runners (Phase 4+)
 
-## Remote access (optional, later)
+Edit `/opt/ci-hub/.env`, add a GitHub PAT with `repo` and `workflow` scopes:
 
-Nothing in this repo blocks it — add whichever of these fits:
-
-- **Tailscale**: install on the VM and your laptop/phone. Access SQ on the
-  VM's tailnet IP. No port changes.
-- **Cloudflare Tunnel**: add a `cloudflared` service alongside SQ, tunnels
-  `sonarqube:9000` out to `https://sonar.<your-domain>`. Optionally gate
-  with Cloudflare Access for email/SSO auth.
-
-Either gives you TLS + external access. Neither requires rethinking the
-compose topology.
-
-## Secrets
-
-Encrypted with SOPS + age. The age private key lives on the Proxmox VM only,
-at `/root/.age/key.txt` (mode 0400); back it up to a password manager.
-Losing both the host and the backup means re-provisioning every secret.
-
-| File | Purpose |
-|---|---|
-| `secrets/postgres_password.age` | SonarQube → Postgres auth |
-| `secrets/sq_admin_password.age` | SonarQube UI admin login (post-rotation) |
-| `secrets/sq_analysis_token.age` | `sonar-scanner` CLI auth (project-scoped) |
-| `secrets/gh_runner_pat.age` | GitHub PAT (`repo`, `workflow`) for runner registration |
-
-Encrypt a new secret:
-
-```bash
-printf 'value' | sops --encrypt --input-type binary --output-type binary \
-    --output secrets/postgres_password.age /dev/stdin
 ```
+GITHUB_PAT=ghp_xxx
+```
+
+Then:
+
+```
+cd /opt/ci-hub
+docker compose -f compose.yml up -d
+```
+
+This brings up Trivy + 2× GitHub Actions runners in DinD sidecars.
+
+## Remote access (optional)
+
+Not needed for LAN access. For remote, add one of these later without
+touching the compose topology:
+
+- **Tailscale**: install on VM and your devices. Access via magic DNS.
+- **Cloudflare Tunnel**: run `cloudflared` alongside SQ, tunnel `:9000` to
+  `https://sonar.<your-domain>`. Optionally gate with Cloudflare Access.
+
+Either gives TLS + external access.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `install.sh` | Curl-installable entry point: clones repo, runs bootstrap-vm.sh |
-| `compose.minimal.yml` | Hub only: postgres + sonarqube. Phase 3 bootstrap target. |
-| `compose.yml` | `include:`s minimal, adds trivy + 2× runner/dind. Phase 4+. |
-| `.sops.yaml` | SOPS/age config. Placeholder recipient until `age-keygen` is run. |
-| `scripts/bootstrap-vm.sh` | Install Docker CE, decrypt secrets, bring up minimal hub |
+| `install.sh` | Curl-installable entry point |
+| `compose.minimal.yml` | Hub only: postgres + sonarqube |
+| `compose.yml` | `include:`s minimal, adds trivy + 2× runner/dind |
+| `.env` | Generated at install time; contains passwords; gitignored |
 
 ## Non-goals
 
 Public-repo / fork-PR execution. HA. GHAS / CodeQL on private repos.
-Registry caches (Verdaccio / devpi / Athens). TLS in the MVP. Single
-Proxmox node is a SPOF, accepted.
+Registry caches. TLS in MVP. Single Proxmox node is a SPOF, accepted.

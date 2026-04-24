@@ -1,72 +1,126 @@
-#!/usr/bin/env bash
-# One-shot installer for ci-hub. Intended for `curl | sudo bash` on a fresh
-# Debian 12 VM.
+#!/bin/sh
+# One-shot installer for ci-hub on Debian 12.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh \
-#     | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh | sudo sh
 #
-# With overrides:
-#   curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh \
-#     | sudo INSTALL_DIR=/opt/ci-hub BRANCH=main bash
-#
-# What this does:
-#   1. Installs git if missing.
-#   2. Clones the ci-hub repo at $INSTALL_DIR (default: /opt/ci-hub).
-#   3. Hands off to scripts/bootstrap-vm.sh, which installs Docker CE,
-#      sops, age; decrypts secrets/*.age; brings up compose.minimal.yml.
-#
-# What it does NOT do (prerequisites you must provide):
-#   - An age private key at /root/.age/key.txt (mode 0400), and the matching
-#     public key pasted into .sops.yaml so secrets/*.age can be decrypted.
-#   - The initial secrets/postgres_password.age (encrypted with sops/age).
-#
-# Safety note:
-#   Piping an unreviewed script into sudo bash is a real footgun. If you do
-#   not trust this repo, download install.sh first, read it, then run it:
-#     curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh -o install.sh
-#     less install.sh
-#     sudo bash install.sh
+# Installs Docker, clones the repo, generates a random Postgres password,
+# and brings up SonarQube. Access at http://<VM_IP>:9000 — first login is
+# admin/admin; rotate the password immediately.
 
-set -euo pipefail
+set -eu
 
-: "${INSTALL_DIR:=/opt/ci-hub}"
-: "${BRANCH:=main}"
-: "${REPO_URL:=https://github.com/kuchmenko/ci-hub.git}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/ci-hub}"
+BRANCH="${BRANCH:-main}"
+REPO_URL="${REPO_URL:-https://github.com/kuchmenko/ci-hub.git}"
 
-log()  { printf '[install] %s\n' "$*"; }
-warn() { printf '[install] %s\n' "$*" >&2; }
-die()  { warn "$*"; exit 1; }
+log() { printf '[install] %s\n' "$*"; }
+die() { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 
-[[ $EUID -eq 0 ]] || die "must run as root: pipe into 'sudo bash'"
+[ "$(id -u)" -eq 0 ] || die "must run as root: pipe into 'sudo sh'"
 
-if [[ ! -f /etc/os-release ]]; then
-    die "/etc/os-release not found — cannot determine OS"
-fi
+[ -f /etc/os-release ] || die "/etc/os-release not found — cannot determine OS"
 # shellcheck source=/dev/null
 . /etc/os-release
-if [[ "${ID:-}" != "debian" || "${VERSION_CODENAME:-}" != "bookworm" ]]; then
-    warn "tested only on Debian 12 (bookworm); detected ${ID:-?} ${VERSION_CODENAME:-?}"
+if [ "${ID:-}" != "debian" ]; then
+    log "WARNING: tested on Debian 12; detected ${ID:-?} ${VERSION_CODENAME:-?}"
+fi
+
+# ---- Docker CE + git ----
+
+if ! command -v docker >/dev/null 2>&1; then
+    log "Installing Docker CE..."
+    apt-get update -qq
+    apt-get install -y -qq ca-certificates curl gnupg git
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    arch="$(dpkg --print-architecture)"
+    codename="${VERSION_CODENAME:-bookworm}"
+    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian %s stable\n' \
+        "$arch" "$codename" > /etc/apt/sources.list.d/docker.list
+    apt-get update -qq
+    apt-get install -y -qq docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin
+    systemctl enable --now docker
 fi
 
 if ! command -v git >/dev/null 2>&1; then
-    log "Installing git..."
-    apt-get update -qq
     apt-get install -y -qq git
 fi
 
-if [[ -d "$INSTALL_DIR/.git" ]]; then
-    log "Updating existing checkout at $INSTALL_DIR (branch: $BRANCH)..."
+# ---- Elasticsearch kernel tunable (required by SonarQube) ----
+
+current_mmc="$(sysctl -n vm.max_map_count)"
+if [ "$current_mmc" -lt 262144 ]; then
+    log "Setting vm.max_map_count=262144 (persistent)..."
+    printf 'vm.max_map_count=262144\n' > /etc/sysctl.d/99-sonarqube.conf
+    sysctl -p /etc/sysctl.d/99-sonarqube.conf >/dev/null
+fi
+
+# ---- Clone / update repo ----
+
+if [ -d "$INSTALL_DIR/.git" ]; then
+    log "Updating $INSTALL_DIR (branch: $BRANCH)..."
     git -C "$INSTALL_DIR" fetch --quiet origin "$BRANCH"
     git -C "$INSTALL_DIR" checkout --quiet "$BRANCH"
     git -C "$INSTALL_DIR" pull --ff-only --quiet origin "$BRANCH"
-elif [[ -e "$INSTALL_DIR" ]]; then
-    die "$INSTALL_DIR exists but is not a git repo — move it aside first"
+elif [ -e "$INSTALL_DIR" ]; then
+    die "$INSTALL_DIR exists but is not a git repo"
 else
-    log "Cloning $REPO_URL into $INSTALL_DIR (branch: $BRANCH)..."
+    log "Cloning into $INSTALL_DIR..."
     git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"
 fi
 
 cd "$INSTALL_DIR"
-log "Handing off to scripts/bootstrap-vm.sh..."
-exec ./scripts/bootstrap-vm.sh
+
+# ---- First-run: generate .env with random PG password ----
+
+if [ ! -f .env ]; then
+    log "Generating .env with random Postgres password..."
+    pg_pass="$(head -c 24 /dev/urandom | base64 | tr -d '/=+')"
+    {
+        printf '# Generated by install.sh on %s. Do not commit.\n' "$(date -Iseconds)"
+        printf 'POSTGRES_PASSWORD=%s\n' "$pg_pass"
+    } > .env
+    chmod 0600 .env
+fi
+
+# ---- Bring up hub ----
+
+log "Starting SonarQube + Postgres..."
+docker compose -f compose.minimal.yml up -d
+
+log "Waiting for SonarQube to become healthy (typically ~2 minutes)..."
+deadline="$(( $(date +%s) + 300 ))"
+while :; do
+    if docker compose -f compose.minimal.yml ps | grep -q 'sonarqube.*(healthy)'; then
+        break
+    fi
+    if [ "$(date +%s)" -gt "$deadline" ]; then
+        docker compose -f compose.minimal.yml ps
+        die "SonarQube did not reach healthy state within 5 minutes"
+    fi
+    sleep 10
+done
+
+vm_ip="$(hostname -I | awk '{print $1}')"
+
+cat <<EOF
+
+[install] done.
+
+SonarQube:    http://${vm_ip}:9000
+First login:  admin / admin  (rotate the password immediately)
+
+Next steps in SonarQube UI:
+  1. Rotate admin password
+  2. Generate an analysis token (for CI runners)
+  3. (optional) Configure quality gates
+
+Runners + Trivy (Phase 4+):
+  Add GITHUB_PAT=ghp_... to $INSTALL_DIR/.env, then:
+    cd $INSTALL_DIR
+    docker compose -f compose.yml up -d
+
+EOF

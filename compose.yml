@@ -1,9 +1,5 @@
-# Full stack: minimal hub (included) + trivy server + 2× runner/dind pairs.
-# All services share the default project network — runners reach
-# sonarqube and trivy via Docker DNS.
-#
-# Start: docker compose up -d
-# Requires: gh_runner_pat secret decrypted and runner image available.
+# Full stack: minimal hub (included) + trivy + 2× runner/dind pairs.
+# GITHUB_PAT is read from .env and must have repo + workflow scopes.
 
 name: ci-hub
 
@@ -25,7 +21,7 @@ services:
 
   dind-01:
     image: docker:24-dind
-    # privileged inside the VM = root in the guest kernel, not on Proxmox.
+    # privileged = root in the VM guest kernel, not on Proxmox.
     # Combined with the VM hypervisor boundary, acceptable per issue #1.
     privileged: true
     environment:
@@ -53,9 +49,7 @@ services:
       RUNNER_LABELS: self-hosted,linux,x64
       RUNNER_EPHEMERAL: "true"
       GITHUB_OWNER: kuchmenko
-      GITHUB_PAT_FILE: /run/secrets/gh_runner_pat
-    secrets:
-      - gh_runner_pat
+      GITHUB_PAT: ${GITHUB_PAT:?GITHUB_PAT missing — add to .env to register runners}
     # Ephemeral runner exits after each job; `restart: always` spawns a fresh
     # container which re-registers with GitHub on boot.
     restart: always
@@ -85,16 +79,10 @@ services:
       RUNNER_LABELS: self-hosted,linux,x64
       RUNNER_EPHEMERAL: "true"
       GITHUB_OWNER: kuchmenko
-      GITHUB_PAT_FILE: /run/secrets/gh_runner_pat
-    secrets:
-      - gh_runner_pat
+      GITHUB_PAT: ${GITHUB_PAT:?GITHUB_PAT missing — add to .env to register runners}
     restart: always
 
 volumes:
   trivy-db:
   dind-01-data:
   dind-02-data:
-
-secrets:
-  gh_runner_pat:
-    file: ./secrets/gh_runner_pat
