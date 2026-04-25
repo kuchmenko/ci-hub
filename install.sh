@@ -91,20 +91,31 @@ fi
 log "Starting SonarQube + Postgres..."
 docker compose -f compose.minimal.yml up -d
 
-log "Waiting for SonarQube to become healthy (typically ~2 minutes)..."
-deadline="$(( $(date +%s) + 300 ))"
+log "Waiting for SonarQube to become healthy (typically 3-7 minutes; on a"
+log "small LXC the embedded Elasticsearch can take longer to settle)..."
+deadline="$(( $(date +%s) + 600 ))"
+healthy=0
 while :; do
     if docker compose -f compose.minimal.yml ps | grep -q 'sonarqube.*(healthy)'; then
+        healthy=1
         break
     fi
     if [ "$(date +%s)" -gt "$deadline" ]; then
-        docker compose -f compose.minimal.yml ps
-        die "SonarQube did not reach healthy state within 5 minutes"
+        break
     fi
     sleep 10
 done
 
 vm_ip="$(hostname -I | awk '{print $1}')"
+
+if [ "$healthy" -eq 1 ]; then
+    log "SonarQube is healthy."
+else
+    log "SonarQube did not report healthy in 10 minutes. It may still be"
+    log "starting; check status with:"
+    log "  cd $INSTALL_DIR && docker compose -f compose.minimal.yml ps"
+    log "  curl -fsSL http://${vm_ip}:9000/api/system/status"
+fi
 
 cat <<EOF
 
