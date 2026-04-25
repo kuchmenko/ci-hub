@@ -128,9 +128,8 @@ After=syslog.target network.target postgresql.service
 Requires=postgresql.service
 
 [Service]
-Type=forking
-ExecStart=${SONAR_HOME}/bin/linux-x86-64/sonar.sh start
-ExecStop=${SONAR_HOME}/bin/linux-x86-64/sonar.sh stop
+Type=simple
+ExecStart=${SONAR_HOME}/bin/linux-x86-64/sonar.sh console
 User=sonarqube
 Group=sonarqube
 Restart=on-failure
