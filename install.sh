@@ -53,7 +53,8 @@ apt-get update -qq
 apt-get install -y -qq \
     postgresql-15 \
     openjdk-17-jre-headless \
-    unzip wget curl ca-certificates
+    unzip wget curl ca-certificates \
+    locales-all
 
 # ---- Generate / load .env ----
 
@@ -81,8 +82,14 @@ fi
 # Always sync password (in case .env changed)
 runuser -u postgres -- psql -c "ALTER USER sonarqube WITH PASSWORD '$POSTGRES_PASSWORD';" >/dev/null
 
-if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='sonarqube'" | grep -q 1; then
-    runuser -u postgres -- psql -c "CREATE DATABASE sonarqube OWNER sonarqube;"
+existing_enc="$(runuser -u postgres -- psql -tAc "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname='sonarqube'" | tr -d ' ')"
+if [ -n "$existing_enc" ] && [ "$existing_enc" != "UTF8" ]; then
+    log "Dropping existing 'sonarqube' DB (wrong encoding: $existing_enc)..."
+    runuser -u postgres -- dropdb sonarqube
+    existing_enc=""
+fi
+if [ -z "$existing_enc" ]; then
+    runuser -u postgres -- psql -c "CREATE DATABASE sonarqube OWNER sonarqube ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;"
 fi
 
 # ---- Download and unpack SonarQube ----
