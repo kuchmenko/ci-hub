@@ -1,125 +1,93 @@
 # ci-hub
 
-Self-hosted CI + static analysis pipeline for the homelab. Target: SonarQube
-Community Build with unified SARIF output across TypeScript, Python, Go,
-and Rust, plus ephemeral GitHub Actions runners (DinD-isolated).
+Self-hosted SonarQube Community Build for the homelab. Native install (no
+Docker) so it runs cleanly inside an unprivileged Proxmox LXC.
 
 Full design and rationale: [kuchmenko/ci-hub#1](https://github.com/kuchmenko/ci-hub/issues/1).
 
-## Status
-
-| Component | State |
-|---|---|
-| One-shot installer (Docker + SonarQube + Postgres) | works |
-| SonarQube on LAN (`http://<VM_IP>:9000`) | works |
-| Trivy server + runners in `compose.yml` | defined; not yet usable (runner image missing) |
-| Reusable CI workflow templates | not started |
-| Claude feedback-loop tooling | not started |
-
-The installer brings up SonarQube only. Everything else is scaffolded but
-requires missing pieces.
-
 ## Install
 
-On a fresh Debian 12 VM:
+On a fresh Debian 12 LXC or VM, as root:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh | sh
 ```
 
-~3 minutes. SonarQube on `http://<VM_IP>:9000`. First login is
-`admin` / `admin` — rotate the password immediately.
+~5 minutes. SonarQube on `http://<HOST_IP>:9000`. First login is
+`admin` / `admin` — rotate immediately.
 
-Inspect first if you prefer:
+### Prereq for LXC
 
-```
-curl -fsSL https://raw.githubusercontent.com/kuchmenko/ci-hub/main/install.sh -o install.sh
-less install.sh
-sudo sh install.sh
-```
-
-### What install.sh does
-
-1. Installs Docker CE and git (idempotent; skipped if present).
-2. Sets `vm.max_map_count=262144` for SonarQube's embedded Elasticsearch.
-3. Clones this repo to `/opt/ci-hub`.
-4. Generates a random Postgres password into `/opt/ci-hub/.env`.
-5. `docker compose -f compose.minimal.yml up -d` — postgres + sonarqube.
-6. Waits for SonarQube to report healthy.
-
-### First-run setup in SonarQube UI
-
-1. Rotate the admin password.
-2. Generate an analysis token (used later by CI runners).
-
-### Re-running
-
-The installer is idempotent. Re-running on the same VM updates the repo
-(`git pull --ff-only`), preserves the existing `.env`, and re-applies
-`docker compose up -d`.
-
-## Runners (not yet usable)
-
-`compose.yml` references `ghcr.io/kuchmenko/gh-runner:latest`, which **does
-not exist yet**. Before runners can come up, either:
-
-- build the image from a dedicated `runner/Dockerfile` (planned), or
-- substitute `myoung34/docker-github-actions-runner:latest` and adjust env
-  variable names.
-
-Once the image is available: add a GitHub PAT with `repo` + `workflow`
-scopes to `/opt/ci-hub/.env`:
+`vm.max_map_count` must be ≥ 262144 on the **Proxmox host** (LXC inherits it
+from the host kernel; you cannot set it from inside the container):
 
 ```
-GITHUB_PAT=ghp_xxx
+echo 'vm.max_map_count=262144' > /etc/sysctl.d/99-sonarqube.conf
+sysctl --system
 ```
 
-Then:
+## What install.sh does
 
-```
-cd /opt/ci-hub
-docker compose -f compose.yml up -d
-```
+1. `apt install postgresql-15 openjdk-17-jre-headless unzip wget curl`.
+2. Generates a random Postgres password into `/opt/ci-hub/.env`.
+3. Creates `sonarqube` PG role + DB.
+4. Downloads SonarQube Community Build to `/opt/sonarqube`.
+5. Creates the `sonarqube` system user.
+6. Writes `/opt/sonarqube/conf/sonar.properties` (JDBC, web host/port).
+7. Writes `/etc/systemd/system/sonarqube.service`.
+8. `systemctl enable --now sonarqube`.
+9. Polls `/api/system/status` until UP (or warns at 10 min).
 
-This brings up Trivy + two ephemeral runners in DinD sidecars.
+## Operations
+
+| Action | Command |
+|---|---|
+| Status | `systemctl status sonarqube` |
+| Logs (live) | `journalctl -u sonarqube -f` |
+| App logs | `tail -f /opt/sonarqube/logs/web.log` |
+| Restart | `systemctl restart sonarqube` |
+| Re-run installer (idempotent) | `curl ... \| sh` again |
+
+## Connecting a GitHub Actions runner
+
+Self-hosted runner sends scan results to SQ via the analysis token:
+
+1. SQ UI → your avatar → My Account → Security → Generate Tokens → type
+   `Project Analysis Token`. Copy the token.
+2. GitHub repo → Settings → Secrets and variables → Actions → New repo secret:
+   - `SONAR_TOKEN` = the token
+3. Workflow step:
+   ```yaml
+   - uses: sonarsource/sonarqube-scan-action@v3
+     env:
+       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+       SONAR_HOST_URL: http://<HOST_IP>:9000
+   ```
 
 ## Remote access (optional)
 
-LAN-only out of the box. To reach SonarQube from outside the LAN, add one
-of these — neither changes the compose topology:
+LAN-only out of the box. To reach from outside the LAN, add one of these —
+neither requires touching the install:
 
-- **Tailscale**: install on the VM and your devices; reach the VM via
-  magic DNS. Simplest for personal use.
-- **Cloudflare Tunnel**: run `cloudflared` alongside SQ, tunnel `:9000`
-  to `https://sonar.<your-domain>`. Optionally gate with Cloudflare
-  Access for SSO/email auth.
-
-Both give TLS + external access without TLS work on this side.
+- **Tailscale** — install on this host and your devices; reach via magic DNS.
+- **Cloudflare Tunnel** — run `cloudflared` pointing at `:9000`, expose at
+  `https://sonar.<your-domain>`. Optionally gate with Cloudflare Access.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `install.sh` | POSIX curl-installable entry point |
-| `compose.minimal.yml` | Hub only: postgres + sonarqube |
-| `compose.yml` | `include:`s minimal, adds trivy + 2× runner/dind |
-| `.env` | Generated at install time; contains the Postgres password; gitignored |
+| `install.sh` | One-shot installer (POSIX sh) |
+| `/opt/ci-hub/.env` | Generated Postgres password (gitignored if ever committed back) |
+| `/opt/sonarqube/` | SonarQube install root |
+| `/etc/systemd/system/sonarqube.service` | Systemd unit |
 
 ## Reset
 
-To wipe a VM back to pre-install state:
-
 ```
-cd /opt/ci-hub
-docker compose -f compose.yml down -v   # -v removes volumes (SQ data + PG data)
-rm -rf /opt/ci-hub
+systemctl disable --now sonarqube postgresql
+rm -rf /opt/sonarqube /opt/ci-hub /etc/systemd/system/sonarqube.service
+sudo -u postgres dropdb sonarqube
+sudo -u postgres dropuser sonarqube
+apt purge -y postgresql-15 openjdk-17-jre-headless
 ```
-
-Docker CE and the `vm.max_map_count` sysctl stay installed — remove those
-manually if needed.
-
-## Non-goals
-
-Public-repo or fork-PR execution. HA. GHAS / CodeQL on private repos.
-Registry caches (Verdaccio / devpi / Athens). TLS in MVP. Single Proxmox
-node SPOF, accepted.
