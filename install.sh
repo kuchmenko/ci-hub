@@ -75,14 +75,14 @@ fi
 log "Configuring PostgreSQL..."
 systemctl enable --now postgresql
 
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='sonarqube'" | grep -q 1; then
-    sudo -u postgres psql -c "CREATE USER sonarqube WITH PASSWORD '$POSTGRES_PASSWORD';"
+if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='sonarqube'" | grep -q 1; then
+    runuser -u postgres -- psql -c "CREATE USER sonarqube WITH PASSWORD '$POSTGRES_PASSWORD';"
 fi
 # Always sync password (in case .env changed)
-sudo -u postgres psql -c "ALTER USER sonarqube WITH PASSWORD '$POSTGRES_PASSWORD';" >/dev/null
+runuser -u postgres -- psql -c "ALTER USER sonarqube WITH PASSWORD '$POSTGRES_PASSWORD';" >/dev/null
 
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='sonarqube'" | grep -q 1; then
-    sudo -u postgres psql -c "CREATE DATABASE sonarqube OWNER sonarqube;"
+if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='sonarqube'" | grep -q 1; then
+    runuser -u postgres -- psql -c "CREATE DATABASE sonarqube OWNER sonarqube;"
 fi
 
 # ---- Download and unpack SonarQube ----
